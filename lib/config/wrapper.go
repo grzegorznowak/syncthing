@@ -76,6 +76,7 @@ func Wrap(path string, cfg Configuration) *Wrapper {
 // Load loads an existing file on disk and returns a new configuration
 // wrapper.
 func Load(path string, myID protocol.DeviceID) (*Wrapper, error) {
+
 	fd, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -128,6 +129,15 @@ func (w *Wrapper) RawCopy() Configuration {
 	w.mut.Lock()
 	defer w.mut.Unlock()
 	return w.cfg.Copy()
+}
+
+// (introducer ovveride) RawCopy returns a copy of the currently wrapped Configuration object.
+func (w *Wrapper) UpdateWithIntroducerOverride() *Wrapper {
+	w.mut.Lock()
+	defer w.mut.Unlock()
+	w.cfg = w.cfg.CopyWithIntroducerOverride()
+
+	return nil
 }
 
 // ReplaceBlocking swaps the current configuration object for the given one,

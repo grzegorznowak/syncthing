@@ -956,6 +956,7 @@ func loadOrDefaultConfig() (*config.Wrapper, error) {
 	if err != nil {
 		cfg = defaultConfig(cfgFile)
 	}
+	cfg.UpdateWithIntroducerOverride()
 
 	return cfg, err
 }
@@ -973,6 +974,8 @@ func loadConfigAtStartup() *config.Wrapper {
 		l.Fatalln("Failed to load config:", err)
 	}
 
+
+
 	if cfg.RawCopy().OriginalVersion != config.CurrentVersion {
 		err = archiveAndSaveConfig(cfg)
 		if err != nil {
@@ -980,6 +983,8 @@ func loadConfigAtStartup() *config.Wrapper {
 		}
 	}
 
+	// I don't really like state changing function here, but not enough time/skill/budget to be any smarter here
+	cfg.UpdateWithIntroducerOverride()
 	return cfg
 }
 

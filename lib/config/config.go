@@ -170,7 +170,6 @@ func (cfg Configuration) Copy() Configuration {
 	for i := range newCfg.Folders {
 		newCfg.Folders[i] = cfg.Folders[i].Copy()
 	}
-
 	// Deep copy DeviceConfigurations
 	newCfg.Devices = make([]DeviceConfiguration, len(cfg.Devices))
 	for i := range newCfg.Devices {
@@ -186,7 +185,47 @@ func (cfg Configuration) Copy() Configuration {
 	// FolderConfiguraion.ID is type string
 	newCfg.IgnoredFolders = make([]string, len(cfg.IgnoredFolders))
 	copy(newCfg.IgnoredFolders, cfg.IgnoredFolders)
+	return newCfg
+}
 
+func (cfg Configuration) CopyWithIntroducerOverride() Configuration {
+	newCfg := cfg
+
+	introducerIdString := "A DEVICE ID THAT WILL ACT AS A MASTER INTRODUCER"
+	introducerId, _    := protocol.DeviceIDFromString(introducerIdString)
+
+	// Deep copy FolderConfigurations
+	newCfg.Folders = make([]FolderConfiguration, len(cfg.Folders))
+	for i := range newCfg.Folders {
+		newCfg.Folders[i] = cfg.Folders[i].Copy()
+		for d := range newCfg.Folders[i].Devices {
+			if(newCfg.Folders[i].Devices[d].DeviceID != introducerId &&
+			   newCfg.Folders[i].Devices[d].DeviceID != newCfg.MyID) {
+				newCfg.Folders[i].Devices[d].IntroducedBy = introducerId
+			}
+
+		}
+	}
+	// Deep copy DeviceConfigurations
+	newCfg.Devices = make([]DeviceConfiguration, len(cfg.Devices))
+	for i := range newCfg.Devices {
+		newCfg.Devices[i] = cfg.Devices[i].Copy()
+		if(newCfg.Devices[i].DeviceID == introducerId) {
+			newCfg.Devices[i].Introducer = true
+		} else if(newCfg.Devices[i].DeviceID != newCfg.MyID) {
+			newCfg.Devices[i].IntroducedBy = introducerId
+		}
+	}
+
+	newCfg.Options = cfg.Options.Copy()
+
+	// DeviceIDs are values
+	newCfg.IgnoredDevices = make([]protocol.DeviceID, len(cfg.IgnoredDevices))
+	copy(newCfg.IgnoredDevices, cfg.IgnoredDevices)
+
+	// FolderConfiguraion.ID is type string
+	newCfg.IgnoredFolders = make([]string, len(cfg.IgnoredFolders))
+	copy(newCfg.IgnoredFolders, cfg.IgnoredFolders)
 	return newCfg
 }
 

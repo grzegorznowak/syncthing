@@ -112,6 +112,7 @@ var (
 	errFolderPaused      = errors.New("folder is paused")
 	errFolderMissing     = errors.New("no such folder")
 	errNetworkNotAllowed = errors.New("network not allowed")
+	errWrongVersion      = errors.New("device has a different version installed than ours")
 )
 
 // NewModel creates and starts a new model. The model starts in read-only mode,
@@ -525,7 +526,9 @@ func (m *Model) ConnectionStats() map[string]interface{} {
 	res := make(map[string]interface{})
 	devs := m.cfg.Devices()
 	conns := make(map[string]ConnectionInfo, len(devs))
+
 	for device, deviceCfg := range devs {
+
 		hello := m.helloMessages[device]
 		versionString := hello.ClientVersion
 		if hello.ClientName != "syncthing" {
@@ -880,7 +883,6 @@ func (m *Model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 	// for folders that we don't expect (unknown or not shared).
 	// Also, collect a list of folders we do share, and if he's interested in
 	// temporary indexes, subscribe the connection.
-
 	tempIndexFolders := make([]string, 0, len(cm.Folders))
 
 	m.pmut.RLock()
@@ -1394,6 +1396,11 @@ func (m *Model) SetIgnores(folder string, content []string) error {
 // This allows us to extract some information from the Hello message
 // and add it to a list of known devices ahead of any checks.
 func (m *Model) OnHello(remoteID protocol.DeviceID, addr net.Addr, hello protocol.HelloResult) error {
+
+	if(hello.ClientVersion != m.clientVersion) {
+		return errWrongVersion
+	}
+
 	if m.cfg.IgnoredDevice(remoteID) {
 		return errDeviceIgnored
 	}
@@ -1438,6 +1445,7 @@ func (m *Model) GetHello(id protocol.DeviceID) protocol.HelloIntf {
 // be sent to the connected peer, thereafter index updates whenever the local
 // folder changes.
 func (m *Model) AddConnection(conn connections.Connection, hello protocol.HelloResult) {
+
 	deviceID := conn.ID()
 
 	m.pmut.Lock()
