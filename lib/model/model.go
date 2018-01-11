@@ -110,6 +110,7 @@ var (
 	errDevicePaused      = errors.New("device is paused")
 	errDeviceIgnored     = errors.New("device is ignored")
 	errFolderPaused      = errors.New("folder is paused")
+	errFolderNotRunning  = errors.New("folder is not running")
 	errFolderMissing     = errors.New("no such folder")
 	errNetworkNotAllowed = errors.New("network not allowed")
 	errWrongVersion      = errors.New("device has a different version installed than ours")
@@ -183,15 +184,13 @@ func (m *Model) StartFolder(folder string) {
 }
 
 func (m *Model) startFolderLocked(folder string) config.FolderType {
-	cfg, ok := m.folderCfgs[folder]
-	if !ok {
-		panic("cannot start nonexistent folder " + cfg.Description())
+	if err := m.checkFolderRunningLocked(folder); err == errFolderMissing {
+		panic("cannot start nonexistent folder " + folder)
+	} else if err == nil {
+		panic("cannot start already running folder " + folder)
 	}
 
-	_, ok = m.folderRunners[folder]
-	if ok {
-		panic("cannot start already running folder " + cfg.Description())
-	}
+	cfg := m.folderCfgs[folder]
 
 	folderFactory, ok := folderFactories[cfg.Type]
 	if !ok {
@@ -384,12 +383,12 @@ func (m *Model) RestartFolder(cfg config.FolderConfiguration) {
 	m.pmut.Lock()
 
 	m.tearDownFolderLocked(cfg.ID)
-	if !cfg.Paused {
+	if cfg.Paused {
+		l.Infoln("Paused folder", cfg.Description())
+	} else {
 		m.addFolderLocked(cfg)
 		folderType := m.startFolderLocked(cfg.ID)
 		l.Infoln("Restarted folder", cfg.Description(), fmt.Sprintf("(%s)", folderType))
-	} else {
-		l.Infoln("Paused folder", cfg.Description())
 	}
 
 	m.pmut.Unlock()
@@ -588,6 +587,7 @@ func (m *Model) FolderStatistics() map[string]stats.FolderStatistics {
 type FolderCompletion struct {
 	CompletionPct float64
 	NeedBytes     int64
+	NeedItems     int64
 	GlobalBytes   int64
 	NeedDeletes   int64
 }
@@ -614,7 +614,7 @@ func (m *Model) Completion(device protocol.DeviceID, folder string) FolderComple
 	counts := m.deviceDownloads[device].GetBlockCounts(folder)
 	m.pmut.RUnlock()
 
-	var need, fileNeed, downloaded, deletes int64
+	var need, items, fileNeed, downloaded, deletes int64
 	rf.WithNeedTruncated(device, func(f db.FileIntf) bool {
 		ft := f.(db.FileInfoTruncated)
 
@@ -633,6 +633,8 @@ func (m *Model) Completion(device protocol.DeviceID, folder string) FolderComple
 		}
 
 		need += fileNeed
+		items++
+
 		return true
 	})
 
@@ -652,6 +654,7 @@ func (m *Model) Completion(device protocol.DeviceID, folder string) FolderComple
 	return FolderCompletion{
 		CompletionPct: completionPct,
 		NeedBytes:     need,
+		NeedItems:     items,
 		GlobalBytes:   tot,
 		NeedDeletes:   deletes,
 	}
@@ -718,15 +721,13 @@ func (m *Model) NeedSize(folder string) db.Counts {
 // NeedFolderFiles returns paginated list of currently needed files in
 // progress, queued, and to be queued on next puller iteration, as well as the
 // total number of files currently needed.
-func (m *Model) NeedFolderFiles(folder string, page, perpage int) ([]db.FileInfoTruncated, []db.FileInfoTruncated, []db.FileInfoTruncated, int) {
+func (m *Model) NeedFolderFiles(folder string, page, perpage int) ([]db.FileInfoTruncated, []db.FileInfoTruncated, []db.FileInfoTruncated) {
 	m.fmut.RLock()
 	defer m.fmut.RUnlock()
 
-	total := 0
-
 	rf, ok := m.folderFiles[folder]
 	if !ok {
-		return nil, nil, nil, 0
+		return nil, nil, nil
 	}
 
 	var progress, queued, rest []db.FileInfoTruncated
@@ -769,7 +770,6 @@ func (m *Model) NeedFolderFiles(folder string, page, perpage int) ([]db.FileInfo
 			return true
 		}
 
-		total++
 		if skip > 0 {
 			skip--
 			return true
@@ -781,10 +781,43 @@ func (m *Model) NeedFolderFiles(folder string, page, perpage int) ([]db.FileInfo
 				get--
 			}
 		}
-		return true
+		return get > 0
 	})
 
-	return progress, queued, rest, total
+	return progress, queued, rest
+}
+
+// RemoteNeedFolderFiles returns paginated list of currently needed files in
+// progress, queued, and to be queued on next puller iteration, as well as the
+// total number of files currently needed.
+func (m *Model) RemoteNeedFolderFiles(device protocol.DeviceID, folder string, page, perpage int) ([]db.FileInfoTruncated, error) {
+	m.fmut.RLock()
+	m.pmut.RLock()
+	if err := m.checkDeviceFolderConnectedLocked(device, folder); err != nil {
+		m.pmut.RUnlock()
+		m.fmut.RUnlock()
+		return nil, err
+	}
+	rf := m.folderFiles[folder]
+	m.pmut.RUnlock()
+	m.fmut.RUnlock()
+
+	files := make([]db.FileInfoTruncated, 0, perpage)
+	skip := (page - 1) * perpage
+	get := perpage
+	rf.WithNeedTruncated(device, func(f db.FileIntf) bool {
+		if skip > 0 {
+			skip--
+			return true
+		}
+		if get > 0 {
+			files = append(files, f.(db.FileInfoTruncated))
+			get--
+		}
+		return get > 0
+	})
+
+	return files, nil
 }
 
 // Index is called when a new device is connected and we receive their full index.
@@ -894,6 +927,8 @@ func (m *Model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 	}
 
 	dbLocation := filepath.Dir(m.db.Location())
+	changed := false
+	deviceCfg := m.cfg.Devices()[deviceID]
 
 	// See issue #3802 - in short, we can't send modern symlink entries to older
 	// clients.
@@ -901,6 +936,13 @@ func (m *Model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 	if hello.ClientName == m.clientName && upgrade.CompareVersions(hello.ClientVersion, "v0.14.14") < 0 {
 		l.Warnln("Not sending symlinks to old client", deviceID, "- please upgrade to v0.14.14 or newer")
 		dropSymlinks = true
+	}
+
+	// Needs to happen outside of the fmut, as can cause CommitConfiguration
+	if deviceCfg.AutoAcceptFolders {
+		for _, folder := range cm.Folders {
+			changed = m.handleAutoAccepts(deviceCfg, folder) || changed
+		}
 	}
 
 	m.fmut.Lock()
@@ -929,6 +971,7 @@ func (m *Model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 			l.Infof("Unexpected folder %s sent from device %q; ensure that the folder exists and that this device is selected under \"Share With\" in the folder configuration.", folder.Description(), deviceID)
 			continue
 		}
+
 		if !folder.DisableTempIndexes {
 			tempIndexFolders = append(tempIndexFolders, folder.ID)
 		}
@@ -1023,8 +1066,7 @@ func (m *Model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 		}
 	}
 
-	var changed = false
-	if deviceCfg := m.cfg.Devices()[deviceID]; deviceCfg.Introducer {
+	if deviceCfg.Introducer {
 		foldersDevices, introduced := m.handleIntroductions(deviceCfg, cm)
 		if introduced {
 			changed = true
@@ -1065,6 +1107,11 @@ func (m *Model) handleIntroductions(introducerCfg config.DeviceConfiguration, cm
 		// the folder.
 	nextDevice:
 		for _, device := range folder.Devices {
+			// No need to share with self.
+			if device.ID == m.id {
+				continue
+			}
+
 			foldersDevices.set(device.ID, folder.ID)
 
 			if _, ok := m.cfg.Devices()[device.ID]; !ok {
@@ -1083,7 +1130,8 @@ func (m *Model) handleIntroductions(introducerCfg config.DeviceConfiguration, cm
 
 			// We don't yet share this folder with this device. Add the device
 			// to sharing list of the folder.
-			m.introduceDeviceToFolder(device, folder, introducerCfg)
+			l.Infof("Sharing folder %s with %v (vouched for by introducer %v)", folder.Description(), device.ID, introducerCfg.DeviceID)
+			m.shareFolderWithDeviceLocked(device.ID, folder.ID, introducerCfg.DeviceID)
 			changed = true
 		}
 	}
@@ -1091,7 +1139,7 @@ func (m *Model) handleIntroductions(introducerCfg config.DeviceConfiguration, cm
 	return foldersDevices, changed
 }
 
-// handleIntroductions handles removals of devices/shares that are removed by an introducer device
+// handleDeintroductions handles removals of devices/shares that are removed by an introducer device
 func (m *Model) handleDeintroductions(introducerCfg config.DeviceConfiguration, cm protocol.ClusterConfig, foldersDevices folderDeviceSet) bool {
 	changed := false
 	foldersIntroducedByOthers := make(folderDeviceSet)
@@ -1144,6 +1192,51 @@ func (m *Model) handleDeintroductions(introducerCfg config.DeviceConfiguration, 
 	return changed
 }
 
+// handleAutoAccepts handles adding and sharing folders for devices that have
+// AutoAcceptFolders set to true.
+func (m *Model) handleAutoAccepts(deviceCfg config.DeviceConfiguration, folder protocol.Folder) bool {
+	if _, ok := m.cfg.Folder(folder.ID); !ok {
+		defaultPath := m.cfg.Options().DefaultFolderPath
+		defaultPathFs := fs.NewFilesystem(fs.FilesystemTypeBasic, defaultPath)
+		for _, path := range []string{folder.Label, folder.ID} {
+			if _, err := defaultPathFs.Lstat(path); !fs.IsNotExist(err) {
+				continue
+			}
+
+			fcfg := config.NewFolderConfiguration(m.id, folder.ID, folder.Label, fs.FilesystemTypeBasic, filepath.Join(defaultPath, path))
+
+			// Need to wait for the waiter, as this calls CommitConfiguration,
+			// which sets up the folder and as we return from this call,
+			// ClusterConfig starts poking at m.folderFiles and other things
+			// that might not exist until the config is committed.
+			w, _ := m.cfg.SetFolder(fcfg)
+			w.Wait()
+
+			// This needs to happen under a lock.
+			m.fmut.Lock()
+			w = m.shareFolderWithDeviceLocked(deviceCfg.DeviceID, folder.ID, protocol.DeviceID{})
+			m.fmut.Unlock()
+			w.Wait()
+			l.Infof("Auto-accepted %s folder %s at path %s", deviceCfg.DeviceID, folder.Description(), fcfg.Path)
+			return true
+		}
+		l.Infof("Failed to auto-accept folder %s from %s due to path conflict", folder.Description(), deviceCfg.DeviceID)
+		return false
+	}
+
+	// Folder does not exist yet.
+	if m.folderSharedWith(folder.ID, deviceCfg.DeviceID) {
+		return false
+	}
+
+	m.fmut.Lock()
+	w := m.shareFolderWithDeviceLocked(deviceCfg.DeviceID, folder.ID, protocol.DeviceID{})
+	m.fmut.Unlock()
+	w.Wait()
+	l.Infof("Shared %s with %s due to auto-accept", folder.ID, deviceCfg.DeviceID)
+	return true
+}
+
 func (m *Model) introduceDevice(device protocol.Device, introducerCfg config.DeviceConfiguration) {
 	addresses := []string{"dynamic"}
 	for _, addr := range device.Addresses {
@@ -1172,18 +1265,17 @@ func (m *Model) introduceDevice(device protocol.Device, introducerCfg config.Dev
 	m.cfg.SetDevice(newDeviceCfg)
 }
 
-func (m *Model) introduceDeviceToFolder(device protocol.Device, folder protocol.Folder, introducerCfg config.DeviceConfiguration) {
-	l.Infof("Sharing folder %s with %v (vouched for by introducer %v)", folder.Description(), device.ID, introducerCfg.DeviceID)
+func (m *Model) shareFolderWithDeviceLocked(deviceID protocol.DeviceID, folder string, introducer protocol.DeviceID) config.Waiter {
+	m.deviceFolders[deviceID] = append(m.deviceFolders[deviceID], folder)
+	m.folderDevices.set(deviceID, folder)
 
-	m.deviceFolders[device.ID] = append(m.deviceFolders[device.ID], folder.ID)
-	m.folderDevices.set(device.ID, folder.ID)
-
-	folderCfg := m.cfg.Folders()[folder.ID]
+	folderCfg := m.cfg.Folders()[folder]
 	folderCfg.Devices = append(folderCfg.Devices, config.FolderDeviceConfiguration{
-		DeviceID:     device.ID,
-		IntroducedBy: introducerCfg.DeviceID,
+		DeviceID:     deviceID,
+		IntroducedBy: introducer,
 	})
-	m.cfg.SetFolder(folderCfg)
+	w, _ := m.cfg.SetFolder(folderCfg)
+	return w
 }
 
 // Closed is called when a connection has been closed
@@ -1494,7 +1586,7 @@ func (m *Model) AddConnection(conn connections.Connection, hello protocol.HelloR
 	conn.ClusterConfig(cm)
 
 	device, ok := m.cfg.Devices()[deviceID]
-	if ok && (device.Name == "" || m.cfg.Options().OverwriteRemoteDevNames) {
+	if ok && (device.Name == "" || m.cfg.Options().OverwriteRemoteDevNames) && hello.DeviceName != "" {
 		device.Name = hello.DeviceName
 		m.cfg.SetDevice(device)
 		m.cfg.Save()
@@ -1814,22 +1906,30 @@ func (m *Model) ScanFolder(folder string) error {
 }
 
 func (m *Model) ScanFolderSubdirs(folder string, subs []string) error {
-	m.fmut.Lock()
-	runner, okRunner := m.folderRunners[folder]
-	cfg, okCfg := m.folderCfgs[folder]
-	m.fmut.Unlock()
-
-	if !okRunner {
-		if okCfg && cfg.Paused {
-			return errFolderPaused
-		}
-		return errFolderMissing
+	m.fmut.RLock()
+	if err := m.checkFolderRunningLocked(folder); err != nil {
+		m.fmut.RUnlock()
+		return err
 	}
+	runner := m.folderRunners[folder]
+	m.fmut.RUnlock()
 
 	return runner.Scan(subs)
 }
 
 func (m *Model) internalScanFolderSubdirs(ctx context.Context, folder string, subDirs []string) error {
+	m.fmut.RLock()
+	if err := m.checkFolderRunningLocked(folder); err != nil {
+		m.fmut.RUnlock()
+		return err
+	}
+	fset := m.folderFiles[folder]
+	folderCfg := m.folderCfgs[folder]
+	ignores := m.folderIgnores[folder]
+	runner := m.folderRunners[folder]
+	m.fmut.RUnlock()
+	mtimefs := fset.MtimeFS()
+
 	for i := 0; i < len(subDirs); i++ {
 		sub := osutil.NativeFilename(subDirs[i])
 
@@ -1848,14 +1948,6 @@ func (m *Model) internalScanFolderSubdirs(ctx context.Context, folder string, su
 		subDirs[i] = sub
 	}
 
-	m.fmut.Lock()
-	fset := m.folderFiles[folder]
-	folderCfg := m.folderCfgs[folder]
-	ignores := m.folderIgnores[folder]
-	runner, ok := m.folderRunners[folder]
-	m.fmut.Unlock()
-	mtimefs := fset.MtimeFS()
-
 	// Check if the ignore patterns changed as part of scanning this folder.
 	// If they did we should schedule a pull of the folder so that we
 	// request things we might have suddenly become unignored and so on.
@@ -1866,13 +1958,6 @@ func (m *Model) internalScanFolderSubdirs(ctx context.Context, folder string, su
 			runner.IgnoresUpdated()
 		}
 	}()
-
-	if !ok {
-		if folderCfg.Paused {
-			return errFolderPaused
-		}
-		return errFolderMissing
-	}
 
 	if err := runner.CheckHealth(); err != nil {
 		return err
@@ -2374,10 +2459,10 @@ func (m *Model) CommitConfiguration(from, to config.Configuration) bool {
 		if _, ok := fromFolders[folderID]; !ok {
 			// A folder was added.
 			if cfg.Paused {
-				l.Infoln(m, "Paused folder", cfg.Description())
+				l.Infoln("Paused folder", cfg.Description())
 				cfg.CreateRoot()
 			} else {
-				l.Infoln(m, "Adding folder", cfg.Description())
+				l.Infoln("Adding folder", cfg.Description())
 				m.AddFolder(cfg)
 				m.StartFolder(folderID)
 			}
@@ -2393,13 +2478,8 @@ func (m *Model) CommitConfiguration(from, to config.Configuration) bool {
 		}
 
 		// This folder exists on both sides. Settings might have changed.
-		// Check if anything differs, apart from the label.
-		toCfgCopy := toCfg
-		fromCfgCopy := fromCfg
-		fromCfgCopy.Label = ""
-		toCfgCopy.Label = ""
-
-		if !reflect.DeepEqual(fromCfgCopy, toCfgCopy) {
+		// Check if anything differs that requires a restart.
+		if !reflect.DeepEqual(fromCfg.RequiresRestartOnly(), toCfg.RequiresRestartOnly()) {
 			m.RestartFolder(toCfg)
 		}
 
@@ -2439,30 +2519,56 @@ func (m *Model) CommitConfiguration(from, to config.Configuration) bool {
 	}
 
 	// Some options don't require restart as those components handle it fine
-	// by themselves.
-	from.Options.URAccepted = to.Options.URAccepted
-	from.Options.URSeen = to.Options.URSeen
-	from.Options.URUniqueID = to.Options.URUniqueID
-	from.Options.ListenAddresses = to.Options.ListenAddresses
-	from.Options.RelaysEnabled = to.Options.RelaysEnabled
-	from.Options.UnackedNotificationIDs = to.Options.UnackedNotificationIDs
-	from.Options.MaxRecvKbps = to.Options.MaxRecvKbps
-	from.Options.MaxSendKbps = to.Options.MaxSendKbps
-	from.Options.LimitBandwidthInLan = to.Options.LimitBandwidthInLan
-	from.Options.StunKeepaliveS = to.Options.StunKeepaliveS
-	from.Options.StunServers = to.Options.StunServers
-	// All of the other generic options require restart. Or at least they may;
-	// removing this check requires going through those options carefully and
-	// making sure there are individual services that handle them correctly.
-	// This code is the "original" requires-restart check and protects other
-	// components that haven't yet been converted to VerifyConfig/CommitConfig
-	// handling.
-	if !reflect.DeepEqual(from.Options, to.Options) {
+	// by themselves. Compare the options structs containing only the
+	// attributes that require restart and act apprioriately.
+	if !reflect.DeepEqual(from.Options.RequiresRestartOnly(), to.Options.RequiresRestartOnly()) {
 		l.Debugln(m, "requires restart, options differ")
 		return false
 	}
 
 	return true
+}
+
+// checkFolderRunningLocked returns nil if the folder is up and running and a
+// descriptive error if not.
+// Need to hold (read) lock on m.fmut when calling this.
+func (m *Model) checkFolderRunningLocked(folder string) error {
+	_, ok := m.folderRunners[folder]
+	if ok {
+		return nil
+	}
+
+	if cfg, ok := m.cfg.Folder(folder); !ok {
+		return errFolderMissing
+	} else if cfg.Paused {
+		return errFolderPaused
+	}
+
+	return errFolderNotRunning
+}
+
+// checkFolderDeviceStatusLocked first checks the folder and then whether the
+// given device is connected and shares this folder.
+// Need to hold (read) lock on both m.fmut and m.pmut when calling this.
+func (m *Model) checkDeviceFolderConnectedLocked(device protocol.DeviceID, folder string) error {
+	if err := m.checkFolderRunningLocked(folder); err != nil {
+		return err
+	}
+
+	if cfg, ok := m.cfg.Device(device); !ok {
+		return errDeviceUnknown
+	} else if cfg.Paused {
+		return errDevicePaused
+	}
+
+	if _, ok := m.conn[device]; !ok {
+		return errors.New("device is not connected")
+	}
+
+	if !m.folderDevices.has(device, folder) {
+		return errors.New("folder is not shared with device")
+	}
+	return nil
 }
 
 // mapFolders returns a map of folder ID to folder configuration for the given

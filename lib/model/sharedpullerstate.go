@@ -96,24 +96,8 @@ func (s *sharedPullerState) tempFile() (io.WriterAt, error) {
 	// here.
 	dir := filepath.Dir(s.tempName)
 	if info, err := s.fs.Stat(dir); err != nil {
-		if fs.IsNotExist(err) {
-			// XXX: This works around a bug elsewhere, a race condition when
-			// things are deleted while being synced. However that happens, we
-			// end up with a directory for "foo" with the delete bit, but a
-			// file "foo/bar" that we want to sync. We never create the
-			// directory, and hence fail to create the file and end up looping
-			// forever on it. This breaks that by creating the directory; on
-			// next scan it'll be found and the delete bit on it is removed.
-			// The user can then clean up as they like...
-			l.Infoln("Resurrecting directory", dir)
-			if err := s.fs.MkdirAll(dir, 0755); err != nil {
-				s.failLocked("resurrect dir", err)
-				return nil, err
-			}
-		} else {
-			s.failLocked("dst stat dir", err)
-			return nil, err
-		}
+		s.failLocked("dst stat dir", err)
+		return nil, err
 	} else if info.Mode()&0200 == 0 {
 		err := s.fs.Chmod(dir, 0755)
 		if !s.ignorePerms && err == nil {
@@ -174,8 +158,27 @@ func (s *sharedPullerState) tempFile() (io.WriterAt, error) {
 		// Truncate sets the size of the file. This creates a sparse file or a
 		// space reservation, depending on the underlying filesystem.
 		if err := fd.Truncate(s.file.Size); err != nil {
-			s.failLocked("dst truncate", err)
-			return nil, err
+			// The truncate call failed. That can happen in some cases when
+			// space reservation isn't possible or over some network
+			// filesystems... This generally doesn't matter.
+
+			if s.reused > 0 {
+				// ... but if we are attempting to reuse a file we have a
+				// corner case when the old file is larger than the new one
+				// and we can't just overwrite blocks and let the old data
+				// linger at the end. In this case we attempt a delete of
+				// the file and hope for better luck next time, when we
+				// should come around with s.reused == 0.
+
+				fd.Close()
+
+				if remErr := s.fs.Remove(s.tempName); remErr != nil {
+					l.Debugln("failed to remove temporary file:", remErr)
+				}
+
+				s.failLocked("dst truncate", err)
+				return nil, err
+			}
 		}
 	}
 
@@ -183,26 +186,6 @@ func (s *sharedPullerState) tempFile() (io.WriterAt, error) {
 	s.fd = fd
 
 	return lockedWriterAt{&s.mut, s.fd}, nil
-}
-
-// sourceFile opens the existing source file for reading
-func (s *sharedPullerState) sourceFile() (fs.File, error) {
-	s.mut.Lock()
-	defer s.mut.Unlock()
-
-	// If we've already hit an error, return early
-	if s.err != nil {
-		return nil, s.err
-	}
-
-	// Attempt to open the existing file
-	fd, err := s.fs.Open(s.realName)
-	if err != nil {
-		s.failLocked("src open", err)
-		return nil, err
-	}
-
-	return fd, nil
 }
 
 // fail sets the error on the puller state compose of error, and marks the

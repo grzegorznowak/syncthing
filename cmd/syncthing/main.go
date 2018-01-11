@@ -179,14 +179,11 @@ are mostly useful for developers. Use with care.
  STPERFSTATS       Write running performance statistics to perf-$pid.csv. Not
                    supported on Windows.
 
- STDEADLOCK        Used for debugging internal deadlocks. Use only under
-                   direction of a developer.
-
  STDEADLOCKTIMEOUT Used for debugging internal deadlocks; sets debug
                    sensitivity. Use only under direction of a developer.
 
- STDEADLOCKTHRESHOLD Used for debugging internal deadlocks; sets debug
-                     sensitivity.  Use only under direction of a developer.
+ STLOCKTHRESHOLD   Used for debugging internal deadlocks; sets debug
+                   sensitivity.  Use only under direction of a developer.
 
  STNORESTART       Equivalent to the -no-restart argument. Disable the
                    Syncthing monitor process which handles restarts for some
@@ -199,6 +196,11 @@ are mostly useful for developers. Use with care.
                    are "standard" for the Go standard library implementation,
                    "minio" for the github.com/minio/sha256-simd implementation,
                    and blank (the default) for auto detection.
+
+ STDBCHECKEVERY    Set to a time interval to override the default database
+                   check interval of 30 days (720h). The interval understands
+                   "h", "m" and "s" abbreviations for hours minutes and seconds.
+                   Valid values are like "720h", "30s", etc.
 
  GOMAXPROCS        Set the maximum number of CPU cores to use. Defaults to all
                    available CPU cores.
@@ -1085,14 +1087,7 @@ func defaultConfig(cfgFile string) *config.Wrapper {
 
 	if !noDefaultFolder {
 		l.Infoln("Default folder created and/or linked to new config")
-		defaultFolder = config.NewFolderConfiguration("default", fs.FilesystemTypeBasic, locations[locDefFolder])
-		defaultFolder.Label = "Default Folder"
-		defaultFolder.RescanIntervalS = 60
-		defaultFolder.FSWatcherDelayS = 10
-		defaultFolder.MinDiskFree = config.Size{Value: 1, Unit: "%"}
-		defaultFolder.Devices = []config.FolderDeviceConfiguration{{DeviceID: myID}}
-		defaultFolder.AutoNormalize = true
-		defaultFolder.MaxConflicts = -1
+		defaultFolder = config.NewFolderConfiguration(myID, "default", "Default Folder", fs.FilesystemTypeBasic, locations[locDefFolder])
 	} else {
 		l.Infoln("We will skip creation of a default folder on first start since the proper envvar is set")
 	}
@@ -1336,7 +1331,7 @@ func setPauseState(cfg *config.Wrapper, paused bool) {
 	for i := range raw.Folders {
 		raw.Folders[i].Paused = paused
 	}
-	if err := cfg.Replace(raw); err != nil {
+	if _, err := cfg.Replace(raw); err != nil {
 		l.Fatalln("Cannot adjust paused state:", err)
 	}
 }
