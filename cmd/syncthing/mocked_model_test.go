@@ -14,6 +14,7 @@ import (
 	"github.com/syncthing/syncthing/lib/model"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/stats"
+	"github.com/syncthing/syncthing/lib/versioner"
 )
 
 type mockedModel struct{}
@@ -63,7 +64,7 @@ func (m *mockedModel) CurrentGlobalFile(folder string, file string) (protocol.Fi
 func (m *mockedModel) ResetFolder(folder string) {
 }
 
-func (m *mockedModel) Availability(folder, file string, version protocol.Vector, block protocol.BlockInfo) []model.Availability {
+func (m *mockedModel) Availability(folder string, file protocol.FileInfo, block protocol.BlockInfo) []model.Availability {
 	return nil
 }
 
@@ -73,6 +74,14 @@ func (m *mockedModel) GetIgnores(folder string) ([]string, []string, error) {
 
 func (m *mockedModel) SetIgnores(folder string, content []string) error {
 	return nil
+}
+
+func (m *mockedModel) GetFolderVersions(folder string) (map[string][]versioner.FileVersion, error) {
+	return nil, nil
+}
+
+func (m *mockedModel) RestoreFolderVersions(folder string, versions map[string]time.Time) (map[string]string, error) {
+	return nil, nil
 }
 
 func (m *mockedModel) PauseDevice(device protocol.DeviceID) {
@@ -121,5 +130,13 @@ func (m *mockedModel) State(folder string) (string, time.Time, error) {
 }
 
 func (m *mockedModel) UsageReportingStats(version int, preview bool) map[string]interface{} {
+	return nil
+}
+
+func (m *mockedModel) PullErrors(folder string) ([]model.FileError, error) {
+	return nil, nil
+}
+
+func (m *mockedModel) WatchError(folder string) error {
 	return nil
 }

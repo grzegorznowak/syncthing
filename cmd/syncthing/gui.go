@@ -40,6 +40,7 @@ import (
 	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/upgrade"
+	"github.com/syncthing/syncthing/lib/versioner"
 	"github.com/vitrun/qart/qr"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -93,8 +94,10 @@ type modelIntf interface {
 	CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool)
 	CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool)
 	ResetFolder(folder string)
-	Availability(folder, file string, version protocol.Vector, block protocol.BlockInfo) []model.Availability
+	Availability(folder string, file protocol.FileInfo, block protocol.BlockInfo) []model.Availability
 	GetIgnores(folder string) ([]string, []string, error)
+	GetFolderVersions(folder string) (map[string][]versioner.FileVersion, error)
+	RestoreFolderVersions(folder string, versions map[string]time.Time) (map[string]string, error)
 	SetIgnores(folder string, content []string) error
 	DelayScan(folder string, next time.Duration)
 	ScanFolder(folder string) error
@@ -108,6 +111,8 @@ type modelIntf interface {
 	RemoteSequence(folder string) (int64, bool)
 	State(folder string) (string, time.Time, error)
 	UsageReportingStats(version int, preview bool) map[string]interface{}
+	PullErrors(folder string) ([]model.FileError, error)
+	WatchError(folder string) error
 }
 
 type configIntf interface {
@@ -214,14 +219,14 @@ func sendJSON(w http.ResponseWriter, jsonObject interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	// Marshalling might fail, in which case we should return a 500 with the
 	// actual error.
-	bs, err := json.Marshal(jsonObject)
+	bs, err := json.MarshalIndent(jsonObject, "", "  ")
 	if err != nil {
 		// This Marshal() can't fail though.
 		bs, _ = json.Marshal(map[string]string{"error": err.Error()})
 		http.Error(w, string(bs), http.StatusInternalServerError)
 		return
 	}
-	w.Write(bs)
+	fmt.Fprintf(w, "%s\n", bs)
 }
 
 func (s *apiService) Serve() {
@@ -259,6 +264,8 @@ func (s *apiService) Serve() {
 	getRestMux.HandleFunc("/rest/db/remoteneed", s.getDBRemoteNeed)              // device folder [perpage] [page]
 	getRestMux.HandleFunc("/rest/db/status", s.getDBStatus)                      // folder
 	getRestMux.HandleFunc("/rest/db/browse", s.getDBBrowse)                      // folder [prefix] [dirsonly] [levels]
+	getRestMux.HandleFunc("/rest/folder/versions", s.getFolderVersions)          // folder
+	getRestMux.HandleFunc("/rest/folder/pullerrors", s.getPullErrors)            // folder
 	getRestMux.HandleFunc("/rest/events", s.getIndexEvents)                      // [since] [limit] [timeout] [events]
 	getRestMux.HandleFunc("/rest/events/disk", s.getDiskEvents)                  // [since] [limit] [timeout]
 	getRestMux.HandleFunc("/rest/stats/device", s.getDeviceStats)                // -
@@ -287,6 +294,7 @@ func (s *apiService) Serve() {
 	postRestMux.HandleFunc("/rest/db/ignores", s.postDBIgnores)                    // folder
 	postRestMux.HandleFunc("/rest/db/override", s.postDBOverride)                  // folder
 	postRestMux.HandleFunc("/rest/db/scan", s.postDBScan)                          // folder [sub...] [delay]
+	postRestMux.HandleFunc("/rest/folder/versions", s.postFolderVersionsRestore)   // folder <body>
 	postRestMux.HandleFunc("/rest/system/config", s.postSystemConfig)              // <body>
 	postRestMux.HandleFunc("/rest/system/error", s.postSystemError)                // <body>
 	postRestMux.HandleFunc("/rest/system/error/clear", s.postSystemErrorClear)     // -
@@ -660,24 +668,38 @@ func (s *apiService) getDBCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	comp := s.model.Completion(device, folder)
-	sendJSON(w, map[string]interface{}{
+	sendJSON(w, jsonCompletion(s.model.Completion(device, folder)))
+}
+
+func jsonCompletion(comp model.FolderCompletion) map[string]interface{} {
+	return map[string]interface{}{
 		"completion":  comp.CompletionPct,
 		"needBytes":   comp.NeedBytes,
 		"needItems":   comp.NeedItems,
 		"globalBytes": comp.GlobalBytes,
 		"needDeletes": comp.NeedDeletes,
-	})
+	}
 }
 
 func (s *apiService) getDBStatus(w http.ResponseWriter, r *http.Request) {
 	qs := r.URL.Query()
 	folder := qs.Get("folder")
-	sendJSON(w, folderSummary(s.cfg, s.model, folder))
+	if sum, err := folderSummary(s.cfg, s.model, folder); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+	} else {
+		sendJSON(w, sum)
+	}
 }
 
-func folderSummary(cfg configIntf, m modelIntf, folder string) map[string]interface{} {
+func folderSummary(cfg configIntf, m modelIntf, folder string) (map[string]interface{}, error) {
 	var res = make(map[string]interface{})
+
+	pullErrors, err := m.PullErrors(folder)
+	if err != nil && err != model.ErrFolderPaused {
+		// Stats from the db can still be obtained if the folder is just paused
+		return nil, err
+	}
+	res["pullErrors"] = len(pullErrors)
 
 	res["invalid"] = "" // Deprecated, retains external API for now
 
@@ -692,7 +714,6 @@ func folderSummary(cfg configIntf, m modelIntf, folder string) map[string]interf
 
 	res["inSyncFiles"], res["inSyncBytes"] = global.Files-need.Files, global.Bytes-need.Bytes
 
-	var err error
 	res["state"], res["stateChanged"], err = m.State(folder)
 	if err != nil {
 		res["error"] = err.Error()
@@ -713,7 +734,12 @@ func folderSummary(cfg configIntf, m modelIntf, folder string) map[string]interf
 		}
 	}
 
-	return res
+	err = m.WatchError(folder)
+	if err != nil {
+		res["watchError"] = err.Error()
+	}
+
+	return res, nil
 }
 
 func (s *apiService) postDBOverride(w http.ResponseWriter, r *http.Request) {
@@ -802,7 +828,7 @@ func (s *apiService) getDBFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	av := s.model.Availability(folder, file, protocol.Vector{}, protocol.BlockInfo{})
+	av := s.model.Availability(folder, gf, protocol.BlockInfo{})
 	sendJSON(w, map[string]interface{}{
 		"global":       jsonFileInfo(gf),
 		"local":        jsonFileInfo(lf),
@@ -956,7 +982,9 @@ func (s *apiService) postSystemErrorClear(w http.ResponseWriter, r *http.Request
 func (s *apiService) getSystemLog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since, err := time.Parse(time.RFC3339, q.Get("since"))
-	l.Debugln(err)
+	if err != nil {
+		l.Debugln(err)
+	}
 	sendJSON(w, map[string][]logger.Line{
 		"messages": s.systemLog.Since(since),
 	})
@@ -965,7 +993,9 @@ func (s *apiService) getSystemLog(w http.ResponseWriter, r *http.Request) {
 func (s *apiService) getSystemLogTxt(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since, err := time.Parse(time.RFC3339, q.Get("since"))
-	l.Debugln(err)
+	if err != nil {
+		l.Debugln(err)
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
 	for _, line := range s.systemLog.Since(since) {
@@ -1309,6 +1339,71 @@ func (s *apiService) getPeerCompletion(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, comp)
 }
 
+func (s *apiService) getFolderVersions(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+	versions, err := s.model.GetFolderVersions(qs.Get("folder"))
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	sendJSON(w, versions)
+}
+
+func (s *apiService) postFolderVersionsRestore(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	bs, err := ioutil.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	var versions map[string]time.Time
+	err = json.Unmarshal(bs, &versions)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	ferr, err := s.model.RestoreFolderVersions(qs.Get("folder"), versions)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	sendJSON(w, ferr)
+}
+
+func (s *apiService) getPullErrors(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+	folder := qs.Get("folder")
+	page, perpage := getPagingParams(qs)
+
+	errors, err := s.model.PullErrors(folder)
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	start := (page - 1) * perpage
+	if start >= len(errors) {
+		errors = nil
+	} else {
+		errors = errors[start:]
+		if perpage < len(errors) {
+			errors = errors[:perpage]
+		}
+	}
+
+	sendJSON(w, map[string]interface{}{
+		"folder":  folder,
+		"errors":  errors,
+		"page":    page,
+		"perpage": perpage,
+	})
+}
+
 func (s *apiService) getSystemBrowse(w http.ResponseWriter, r *http.Request) {
 	qs := r.URL.Query()
 	current := qs.Get("current")
@@ -1402,13 +1497,16 @@ func (f jsonFileInfo) MarshalJSON() ([]byte, error) {
 		"size":          f.Size,
 		"permissions":   fmt.Sprintf("%#o", f.Permissions),
 		"deleted":       f.Deleted,
-		"invalid":       f.Invalid,
+		"invalid":       protocol.FileInfo(f).IsInvalid(),
+		"ignored":       protocol.FileInfo(f).IsIgnored(),
+		"mustRescan":    protocol.FileInfo(f).MustRescan(),
 		"noPermissions": f.NoPermissions,
 		"modified":      protocol.FileInfo(f).ModTime(),
 		"modifiedBy":    f.ModifiedBy.String(),
 		"sequence":      f.Sequence,
 		"numBlocks":     len(f.Blocks),
 		"version":       jsonVersionVector(f.Version),
+		"localFlags":    f.LocalFlags,
 	})
 }
 
@@ -1421,11 +1519,16 @@ func (f jsonDBFileInfo) MarshalJSON() ([]byte, error) {
 		"size":          f.Size,
 		"permissions":   fmt.Sprintf("%#o", f.Permissions),
 		"deleted":       f.Deleted,
-		"invalid":       f.Invalid,
+		"invalid":       db.FileInfoTruncated(f).IsInvalid(),
+		"ignored":       db.FileInfoTruncated(f).IsIgnored(),
+		"mustRescan":    db.FileInfoTruncated(f).MustRescan(),
 		"noPermissions": f.NoPermissions,
 		"modified":      db.FileInfoTruncated(f).ModTime(),
 		"modifiedBy":    f.ModifiedBy.String(),
 		"sequence":      f.Sequence,
+		"numBlocks":     nil, // explicitly unknown
+		"version":       jsonVersionVector(f.Version),
+		"localFlags":    f.LocalFlags,
 	})
 }
 
@@ -1469,9 +1572,14 @@ func addressIsLocalhost(addr string) bool {
 		host = addr
 	}
 	switch strings.ToLower(host) {
-	case "127.0.0.1", "::1", "localhost":
+	case "localhost", "localhost.":
 		return true
 	default:
-		return false
+		ip := net.ParseIP(host)
+		if ip == nil {
+			// not an IP address
+			return false
+		}
+		return ip.IsLoopback()
 	}
 }

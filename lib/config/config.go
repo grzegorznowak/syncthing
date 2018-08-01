@@ -32,15 +32,13 @@ import (
 
 const (
 	OldestHandledVersion = 10
-	CurrentVersion       = 26
+	CurrentVersion       = 28
 	MaxRescanIntervalS   = 365 * 24 * 60 * 60
 )
 
 var (
 	// DefaultTCPPort defines default TCP port used if the URI does not specify one, for example tcp://0.0.0.0
 	DefaultTCPPort = 22000
-	// DefaultKCPPort defines default KCP (UDP) port used if the URI does not specify one, for example kcp://0.0.0.0
-	DefaultKCPPort = 22020
 	// DefaultListenAddresses should be substituted when the configuration
 	// contains <listenAddress>default</listenAddress>. This is done by the
 	// "consumer" of the configuration as we don't want these saved to the
@@ -48,44 +46,22 @@ var (
 	DefaultListenAddresses = []string{
 		util.Address("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(DefaultTCPPort))),
 		"dynamic+https://relays.syncthing.net/endpoint",
-		util.Address("kcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(DefaultKCPPort))),
 	}
 	// DefaultDiscoveryServersV4 should be substituted when the configuration
 	// contains <globalAnnounceServer>default-v4</globalAnnounceServer>.
 	DefaultDiscoveryServersV4 = []string{
-		"https://discovery-v4-2.syncthing.net/v2/?id=DVU36WY-H3LVZHW-E6LLFRE-YAFN5EL-HILWRYP-OC2M47J-Z4PE62Y-ADIBDQC", // 45.55.230.38, USA
-		"https://discovery-v4-3.syncthing.net/v2/?id=VK6HNJ3-VVMM66S-HRVWSCR-IXEHL2H-U4AQ4MW-UCPQBWX-J2L2UBK-NVZRDQZ", // 128.199.95.124, Singapore
-		"https://discovery-v4-4.syncthing.net/v2/?id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW", // 95.85.19.244, NL
+		"https://discovery.syncthing.net/v2/?noannounce&id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW",
+		"https://discovery-v4.syncthing.net/v2/?nolookup&id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW",
 	}
 	// DefaultDiscoveryServersV6 should be substituted when the configuration
 	// contains <globalAnnounceServer>default-v6</globalAnnounceServer>.
 	DefaultDiscoveryServersV6 = []string{
-		"https://discovery-v6-2.syncthing.net/v2/?id=DVU36WY-H3LVZHW-E6LLFRE-YAFN5EL-HILWRYP-OC2M47J-Z4PE62Y-ADIBDQC", // 2604:a880:800:10::182:a001, USA
-		"https://discovery-v6-3.syncthing.net/v2/?id=VK6HNJ3-VVMM66S-HRVWSCR-IXEHL2H-U4AQ4MW-UCPQBWX-J2L2UBK-NVZRDQZ", // 2400:6180:0:d0::d9:d001, Singapore
-		"https://discovery-v6-4.syncthing.net/v2/?id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW", // 2a03:b0c0:0:1010::4ed:3001, NL
+		"https://discovery.syncthing.net/v2/?noannounce&id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW",
+		"https://discovery-v6.syncthing.net/v2/?nolookup&id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW",
 	}
 	// DefaultDiscoveryServers should be substituted when the configuration
 	// contains <globalAnnounceServer>default</globalAnnounceServer>.
 	DefaultDiscoveryServers = append(DefaultDiscoveryServersV4, DefaultDiscoveryServersV6...)
-	// DefaultStunServers should be substituted when the configuration
-	// contains <stunServer>default</stunServer>.
-	DefaultStunServers = []string{
-		"stun.callwithus.com:3478",
-		"stun.counterpath.com:3478",
-		"stun.counterpath.net:3478",
-		"stun.ekiga.net:3478",
-		"stun.ideasip.com:3478",
-		"stun.internetcalls.com:3478",
-		"stun.schlund.de:3478",
-		"stun.sipgate.net:10000",
-		"stun.sipgate.net:3478",
-		"stun.voip.aebc.com:3478",
-		"stun.voiparound.com:3478",
-		"stun.voipbuster.com:3478",
-		"stun.voipstunt.com:3478",
-		"stun.voxgratia.org:3478",
-		"stun.xten.com:3478",
-	}
 	// DefaultTheme is the default and fallback theme for the web UI.
 	DefaultTheme = "default"
 )
@@ -301,6 +277,10 @@ func (cfg *Configuration) clean() error {
 		folder := &cfg.Folders[i]
 		folder.prepare()
 
+		if folder.ID == "" {
+			return fmt.Errorf("folder with empty ID in configuration")
+		}
+
 		if _, ok := seenFolders[folder.ID]; ok {
 			return fmt.Errorf("duplicate folder ID %q in configuration", folder.ID)
 		}
@@ -371,6 +351,12 @@ func (cfg *Configuration) clean() error {
 	if cfg.Version == 25 {
 		convertV25V26(cfg)
 	}
+	if cfg.Version == 26 {
+		convertV26V27(cfg)
+	}
+	if cfg.Version == 27 {
+		convertV27V28(cfg)
+	}
 
 	// Build a list of available devices
 	existingDevices := make(map[protocol.DeviceID]bool)
@@ -378,13 +364,18 @@ func (cfg *Configuration) clean() error {
 		existingDevices[device.DeviceID] = true
 	}
 
-	// Ensure that the device list is free from duplicates
+	// Ensure that the device list is
+	// - free from duplicates
+	// - sorted by ID
 	cfg.Devices = ensureNoDuplicateDevices(cfg.Devices)
-
 	sort.Sort(DeviceConfigurationList(cfg.Devices))
-	// Ensure that any loose devices are not present in the wrong places
-	// Ensure that there are no duplicate devices
-	// Ensure that the versioning configuration parameter map is not nil
+
+	// Ensure that the folder list is sorted by ID
+	sort.Sort(FolderConfigurationList(cfg.Folders))
+	// Ensure that in all folder configs
+	// - any loose devices are not present in the wrong places
+	// - there are no duplicate devices
+	// - the versioning configuration parameter map is not nil
 	for i := range cfg.Folders {
 		cfg.Folders[i].Devices = ensureExistingDevices(cfg.Folders[i].Devices, existingDevices)
 		cfg.Folders[i].Devices = ensureNoDuplicateFolderDevices(cfg.Folders[i].Devices)
@@ -417,7 +408,43 @@ func (cfg *Configuration) clean() error {
 	}
 	cfg.IgnoredDevices = newIgnoredDevices
 
+	// Deprecated protocols are removed from the list of listeners and
+	// device addresses. So far just kcp*.
+	for _, prefix := range []string{"kcp"} {
+		cfg.Options.ListenAddresses = filterURLSchemePrefix(cfg.Options.ListenAddresses, prefix)
+		for i := range cfg.Devices {
+			dev := &cfg.Devices[i]
+			dev.Addresses = filterURLSchemePrefix(dev.Addresses, prefix)
+		}
+	}
+
 	return nil
+}
+
+// DeviceMap returns a map of device ID to device configuration for the given configuration.
+func (cfg *Configuration) DeviceMap() map[protocol.DeviceID]DeviceConfiguration {
+	m := make(map[protocol.DeviceID]DeviceConfiguration, len(cfg.Devices))
+	for _, dev := range cfg.Devices {
+		m[dev.DeviceID] = dev
+	}
+	return m
+}
+
+func convertV27V28(cfg *Configuration) {
+	// Show a notification about enabling filesystem watching
+	cfg.Options.UnackedNotificationIDs = append(cfg.Options.UnackedNotificationIDs, "fsWatcherNotification")
+	cfg.Version = 28
+}
+
+func convertV26V27(cfg *Configuration) {
+	for i := range cfg.Folders {
+		f := &cfg.Folders[i]
+		if f.DeprecatedPullers != 0 {
+			f.PullerMaxPendingKiB = 128 * f.DeprecatedPullers
+			f.DeprecatedPullers = 0
+		}
+	}
+	cfg.Version = 27
 }
 
 func convertV25V26(cfg *Configuration) {
@@ -804,4 +831,22 @@ func cleanSymlinks(filesystem fs.Filesystem, dir string) {
 		}
 		return nil
 	})
+}
+
+// filterURLSchemePrefix returns the list of addresses after removing all
+// entries whose URL scheme matches the given prefix.
+func filterURLSchemePrefix(addrs []string, prefix string) []string {
+	for i := 0; i < len(addrs); i++ {
+		uri, err := url.Parse(addrs[i])
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(uri.Scheme, prefix) {
+			// Remove this entry
+			copy(addrs[i:], addrs[i+1:])
+			addrs = addrs[:len(addrs)-1]
+			i--
+		}
+	}
+	return addrs
 }

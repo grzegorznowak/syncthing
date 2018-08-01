@@ -96,11 +96,8 @@ func TestBlockMapAddUpdateWipe(t *testing.T) {
 		return true
 	})
 
-	f3.Permissions = f1.Permissions
-	f3.Deleted = f1.Deleted
-	f3.Invalid = f1.Invalid
 	f1.Deleted = true
-	f2.Invalid = true
+	f2.LocalFlags = protocol.FlagLocalMustRescan // one of the invalid markers
 
 	// Should remove
 	err = m.Update([]protocol.FileInfo{f1, f2, f3})
@@ -145,14 +142,11 @@ func TestBlockMapAddUpdateWipe(t *testing.T) {
 	}
 
 	f1.Deleted = false
-	f1.Invalid = false
-	f1.Permissions = 0
+	f1.LocalFlags = 0
 	f2.Deleted = false
-	f2.Invalid = false
-	f2.Permissions = 0
+	f2.LocalFlags = 0
 	f3.Deleted = false
-	f3.Invalid = false
-	f3.Permissions = 0
+	f3.LocalFlags = 0
 }
 
 func TestBlockFinderLookup(t *testing.T) {
@@ -218,35 +212,4 @@ func TestBlockFinderLookup(t *testing.T) {
 	}
 
 	f1.Deleted = false
-}
-
-func TestBlockFinderFix(t *testing.T) {
-	db, f := setup()
-
-	iterFn := func(folder, file string, index int32) bool {
-		return true
-	}
-
-	m := NewBlockMap(db, db.folderIdx.ID([]byte("folder1")))
-	err := m.Add([]protocol.FileInfo{f1})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !f.Iterate(folders, f1.Blocks[0].Hash, iterFn) {
-		t.Fatal("Block not found")
-	}
-
-	err = f.Fix("folder1", f1.Name, 0, f1.Blocks[0].Hash, f2.Blocks[0].Hash)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if f.Iterate(folders, f1.Blocks[0].Hash, iterFn) {
-		t.Fatal("Unexpected block")
-	}
-
-	if !f.Iterate(folders, f2.Blocks[0].Hash, iterFn) {
-		t.Fatal("Block not found")
-	}
 }

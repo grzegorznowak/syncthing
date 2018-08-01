@@ -18,3 +18,9 @@ deb
 lib/auto/gui.files.go
 snapcraft.yaml
 .idea
+prime/
+snap/
+parts/
+stage/
+*.snap
+*.bz2

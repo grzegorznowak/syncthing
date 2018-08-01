@@ -46,6 +46,8 @@ var (
 	extraTags     string
 	installSuffix string
 	pkgdir        string
+	debugBinary   bool
+	timeout       = "120s"
 )
 
 type target struct {
@@ -121,7 +123,7 @@ var targets = map[string]target{
 		archiveFiles: []archiveFile{
 			{src: "{{binary}}", dst: "{{binary}}", perm: 0755},
 			{src: "cmd/stdiscosrv/README.md", dst: "README.txt", perm: 0644},
-			{src: "cmd/stdiscosrv/LICENSE", dst: "LICENSE.txt", perm: 0644},
+			{src: "LICENSE", dst: "LICENSE.txt", perm: 0644},
 			{src: "AUTHORS", dst: "AUTHORS.txt", perm: 0644},
 		},
 		installationFiles: []archiveFile{
@@ -237,8 +239,6 @@ func main() {
 	// might have installed during "build.go setup".
 	os.Setenv("PATH", fmt.Sprintf("%s%cbin%c%s", os.Getenv("GOPATH"), os.PathSeparator, os.PathListSeparator, os.Getenv("PATH")))
 
-	checkArchitecture()
-
 	// Invoking build.go with no parameters at all builds everything (incrementally),
 	// which is what you want for maximum error checking during development.
 	if flag.NArg() == 0 {
@@ -257,15 +257,6 @@ func main() {
 		}
 
 		runCommand(flag.Arg(0), target)
-	}
-}
-
-func checkArchitecture() {
-	switch goarch {
-	case "386", "amd64", "arm", "arm64", "ppc64", "ppc64le", "mips", "mipsle":
-		break
-	default:
-		log.Printf("Unknown goarch %q; proceed with caution!", goarch)
 	}
 }
 
@@ -358,6 +349,7 @@ func parseFlags() {
 	flag.StringVar(&extraTags, "tags", extraTags, "Extra tags, space separated")
 	flag.StringVar(&installSuffix, "installsuffix", installSuffix, "Install suffix, optional")
 	flag.StringVar(&pkgdir, "pkgdir", "", "Set -pkgdir parameter for `go build`")
+	flag.BoolVar(&debugBinary, "debug-binary", debugBinary, "Create unoptimized binary to use with delve, set -gcflags='-N -l' and omit -ldflags")
 	flag.Parse()
 }
 
@@ -378,6 +370,7 @@ func setup() {
 		"honnef.co/go/tools/cmd/gosimple",
 		"honnef.co/go/tools/cmd/staticcheck",
 		"honnef.co/go/tools/cmd/unused",
+		"github.com/josephspurrier/goversioninfo",
 	}
 	for _, pkg := range packages {
 		fmt.Println(pkg)
@@ -398,9 +391,9 @@ func test(pkgs ...string) {
 	}
 
 	if useRace {
-		runPrint("go", append([]string{"test", "-short", "-race", "-timeout", "60s", "-tags", "purego"}, pkgs...)...)
+		runPrint("go", append([]string{"test", "-short", "-race", "-timeout", timeout, "-tags", "purego"}, pkgs...)...)
 	} else {
-		runPrint("go", append([]string{"test", "-short", "-timeout", "60s", "-tags", "purego"}, pkgs...)...)
+		runPrint("go", append([]string{"test", "-short", "-timeout", timeout, "-tags", "purego"}, pkgs...)...)
 	}
 }
 
@@ -419,23 +412,24 @@ func install(target target, tags []string) {
 		log.Fatal(err)
 	}
 	os.Setenv("GOBIN", filepath.Join(cwd, "bin"))
-	args := []string{"install", "-v", "-ldflags", ldflags()}
-	if pkgdir != "" {
-		args = append(args, "-pkgdir", pkgdir)
-	}
-	if len(tags) > 0 {
-		args = append(args, "-tags", strings.Join(tags, " "))
-	}
-	if installSuffix != "" {
-		args = append(args, "-installsuffix", installSuffix)
-	}
-	if race {
-		args = append(args, "-race")
-	}
-	args = append(args, target.buildPkg)
+
+	args := []string{"install", "-v"}
+	args = appendParameters(args, tags, target)
 
 	os.Setenv("GOOS", goos)
 	os.Setenv("GOARCH", goarch)
+
+	// On Windows generate a special file which the Go compiler will
+	// automatically use when generating Windows binaries to set things like
+	// the file icon, version, etc.
+	if goos == "windows" {
+		sysoPath, err := shouldBuildSyso(cwd)
+		if err != nil {
+			log.Printf("Warning: Windows binaries will not have file information encoded: %v", err)
+		}
+		defer shouldCleanupSyso(sysoPath)
+	}
+
 	runPrint("go", args...)
 }
 
@@ -445,7 +439,32 @@ func build(target target, tags []string) {
 	tags = append(target.tags, tags...)
 
 	rmr(target.BinaryName())
-	args := []string{"build", "-i", "-v", "-ldflags", ldflags()}
+
+	args := []string{"build", "-i", "-v"}
+	args = appendParameters(args, tags, target)
+
+	os.Setenv("GOOS", goos)
+	os.Setenv("GOARCH", goarch)
+
+	// On Windows generate a special file which the Go compiler will
+	// automatically use when generating Windows binaries to set things like
+	// the file icon, version, etc.
+	if goos == "windows" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatal(err)
+		}
+		sysoPath, err := shouldBuildSyso(cwd)
+		if err != nil {
+			log.Printf("Warning: Windows binaries will not have file information encoded: %v", err)
+		}
+		defer shouldCleanupSyso(sysoPath)
+	}
+
+	runPrint("go", args...)
+}
+
+func appendParameters(args []string, tags []string, target target) []string {
 	if pkgdir != "" {
 		args = append(args, "-pkgdir", pkgdir)
 	}
@@ -458,11 +477,19 @@ func build(target target, tags []string) {
 	if race {
 		args = append(args, "-race")
 	}
-	args = append(args, target.buildPkg)
 
-	os.Setenv("GOOS", goos)
-	os.Setenv("GOARCH", goarch)
-	runPrint("go", args...)
+	if !debugBinary {
+		// Regular binaries get version tagged and skip some debug symbols
+		args = append(args, "-ldflags", ldflags())
+	} else {
+		// -gcflags to disable optimizations and inlining. Skip -ldflags
+		// because `Could not launch program: decoding dwarf section info at
+		// offset 0x0: too short` on 'dlv exec ...' see
+		// https://github.com/derekparker/delve/issues/79
+		args = append(args, "-gcflags", "-N -l")
+	}
+
+	return append(args, target.buildPkg)
 }
 
 func buildTar(target target) {
@@ -591,6 +618,8 @@ func buildSnap(target target) {
 	snaparch := goarch
 	if snaparch == "armhf" {
 		goarch = "arm"
+	} else if snaparch == "i386" {
+		goarch = "386"
 	}
 	snapver := version
 	if strings.HasPrefix(snapver, "v") {
@@ -601,9 +630,10 @@ func buildSnap(target target) {
 		snapgrade = "stable"
 	}
 	err = tmpl.Execute(f, map[string]string{
-		"Version":      snapver,
-		"Architecture": snaparch,
-		"Grade":        snapgrade,
+		"Version":            snapver,
+		"HostArchitecture":   runtime.GOARCH,
+		"TargetArchitecture": snaparch,
+		"Grade":              snapgrade,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -611,6 +641,56 @@ func buildSnap(target target) {
 	runPrint("snapcraft", "clean")
 	build(target, []string{"noupgrade"})
 	runPrint("snapcraft")
+}
+
+func shouldBuildSyso(dir string) (string, error) {
+	jsonPath := filepath.Join(dir, "versioninfo.json")
+	file, err := os.Create(filepath.Join(dir, "versioninfo.json"))
+	if err != nil {
+		return "", errors.New("failed to create " + jsonPath + ": " + err.Error())
+	}
+
+	major, minor, patch, build := semanticVersion()
+	fmt.Fprintf(file, `{
+    "FixedFileInfo": {
+        "FileVersion": {
+            "Major": %s,
+            "Minor": %s,
+            "Patch": %s,
+            "Build": %s
+        }
+    },
+    "StringFileInfo": {
+        "FileDescription": "Open Source Continuous File Synchronization",
+        "LegalCopyright": "The Syncthing Authors",
+        "ProductVersion": "%s",
+        "ProductName": "Syncthing"
+    },
+    "IconPath": "assets/logo.ico"
+}`, major, minor, patch, build, getVersion())
+	file.Close()
+	defer func() {
+		if err := os.Remove(jsonPath); err != nil {
+			log.Printf("Warning: unable to remove generated %s: %v. Please remove it manually.", jsonPath, err)
+		}
+	}()
+
+	sysoPath := filepath.Join(dir, "cmd", "syncthing", "resource.syso")
+
+	if _, err := runError("goversioninfo", "-o", sysoPath); err != nil {
+		return "", errors.New("failed to create " + sysoPath + ": " + err.Error())
+	}
+
+	return sysoPath, nil
+}
+
+func shouldCleanupSyso(sysoFilePath string) {
+	if sysoFilePath == "" {
+		return
+	}
+	if err := os.Remove(sysoFilePath); err != nil {
+		log.Printf("Warning: unable to remove generated %s: %v. Please remove it manually.", sysoFilePath, err)
+	}
 }
 
 // copyFile copies a file from src to dst, ensuring the containing directory
@@ -660,12 +740,12 @@ func listFiles(dir string) []string {
 }
 
 func rebuildAssets() {
-	runPipe("lib/auto/gui.files.go", "go", "run", "script/genassets.go", "gui")
-	runPipe("cmd/strelaypoolsrv/auto/gui.go", "go", "run", "script/genassets.go", "cmd/strelaypoolsrv/gui")
+	os.Setenv("SOURCE_DATE_EPOCH", fmt.Sprint(buildStamp()))
+	runPrint("go", "generate", "github.com/syncthing/syncthing/lib/auto", "github.com/syncthing/syncthing/cmd/strelaypoolsrv/auto")
 }
 
 func lazyRebuildAssets() {
-	if shouldRebuildAssets("lib/auto/gui.files.go", "gui") || shouldRebuildAssets("cmd/strelaypoolsrv/auto/gui.go", "cmd/strelaypoolsrv/auto/gui") {
+	if shouldRebuildAssets("lib/auto/gui.files.go", "gui") || shouldRebuildAssets("cmd/strelaypoolsrv/auto/gui.files.go", "cmd/strelaypoolsrv/auto/gui") {
 		rebuildAssets()
 	}
 }
@@ -697,7 +777,7 @@ func shouldRebuildAssets(target, srcdir string) bool {
 }
 
 func proto() {
-	runPrint("go", "generate", "github.com/syncthing/syncthing/lib/...")
+	runPrint("go", "generate", "github.com/syncthing/syncthing/lib/...", "github.com/syncthing/syncthing/cmd/stdiscosrv")
 }
 
 func translate() {
@@ -787,6 +867,15 @@ func getVersion() string {
 	}
 	// This seems to be a dev build.
 	return "unknown-dev"
+}
+
+func semanticVersion() (major, minor, patch, build string) {
+	r := regexp.MustCompile(`v(?P<Major>\d+)\.(?P<Minor>\d+).(?P<Patch>\d+).*\+(?P<CommitsAhead>\d+)`)
+	matches := r.FindStringSubmatch(getVersion())
+	if len(matches) != 5 {
+		return "0", "0", "0", "0"
+	}
+	return matches[1], matches[2], matches[3], matches[4]
 }
 
 func getBranchSuffix() string {
@@ -883,7 +972,7 @@ func buildHost() string {
 func buildArch() string {
 	os := goos
 	if os == "darwin" {
-		os = "macosx"
+		os = "macos"
 	}
 	return fmt.Sprintf("%s-%s", os, goarch)
 }
