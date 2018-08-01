@@ -359,8 +359,8 @@ func (w *walker) walkRegular(ctx context.Context, relPath string, info fs.FileIn
 	f := protocol.FileInfo{
 		Name:          relPath,
 		Type:          protocol.FileInfoTypeFile,
-		Version:       cf.Version.Update(w.ShortID),
-		Permissions:   uint32(info.Mode() & maskModePerm),
+		Version:       curFile.Version.Update(w.ShortID),
+		Permissions:   newMode & uint32(maskModePerm),
 		NoPermissions: w.IgnorePerms,
 		ModifiedS:     info.ModTime().Unix(),
 		ModifiedNs:    int32(info.ModTime().Nanosecond()),
