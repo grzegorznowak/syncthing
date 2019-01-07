@@ -162,6 +162,8 @@ func (cfg Configuration) Copy() Configuration {
 
     newCfg.PendingDevices = make([]ObservedDevice, len(cfg.PendingDevices))
 	copy(newCfg.PendingDevices, cfg.PendingDevices)
+
+	return newCfg
 }
 
 func (cfg Configuration) CopyWithIntroducerOverride() Configuration {
