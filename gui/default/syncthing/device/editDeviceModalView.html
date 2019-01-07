@@ -1,10 +1,10 @@
 <modal id="editDevice" status="default" icon="{{editingExisting ? 'fas fa-pencil-alt' : 'fas fa-desktop'}}" heading="{{editingExisting ? 'Edit Device' : 'Add Device' | translate}}" large="yes" closeable="yes">
   <div class="modal-body">
     <form role="form" name="deviceEditor">
-      <ul class="nav nav-tabs" ng-init="loadFormIntoScope(folderEditor)">
-        <li class="active"><a data-toggle="tab" href="#device-general"><span class="fas fa-cog"></span><span translate>General</span></a></li>
-        <li><a data-toggle="tab" href="#device-sharing"><span class="fas fa-share-alt"></span><span translate>Sharing</span></a></li>
-        <li><a data-toggle="tab" href="#device-advanced"><span class="fas fa-cogs"></span><span translate>Advanced</span></a></li>
+      <ul class="nav nav-tabs" ng-init="loadFormIntoScope(deviceEditor)">
+        <li class="active"><a data-toggle="tab" href="#device-general"><span class="fas fa-cog"></span> <span translate>General</span></a></li>
+        <li><a data-toggle="tab" href="#device-sharing"><span class="fas fa-share-alt"></span> <span translate>Sharing</span></a></li>
+        <li><a data-toggle="tab" href="#device-advanced"><span class="fas fa-cogs"></span> <span translate>Advanced</span></a></li>
       </ul>
       <div class="tab-content">
         <div id="device-general" class="tab-pane in active">
@@ -38,7 +38,7 @@
             <p translate ng-if="currentDevice.deviceID != myID" class="help-block">Shown instead of Device ID in the cluster status. Will be updated to the name the device advertises if left empty.</p>
           </div>
         </div>
-        <div class="tab-pane" id="device-sharing">
+        <div id="device-sharing" class="tab-pane">
           <div class="row">
             <div class="col-md-6">
               <div class="form-group">
@@ -67,7 +67,11 @@
             <div class="col-md-12">
               <div class="form-group">
                 <label translate for="folders">Share Folders With Device</label>
-                <p translate class="help-block">Select the folders to share with this device.</p>
+                <p class="help-block">
+                  <span translate>Select the folders to share with this device.</span>&emsp;
+                  <small><a href="#" ng-click="selectAllFolders()" translate>Select All</a>&emsp;
+                    <a href="#" ng-click="deSelectAllFolders()" translate>Deselect All</a></small>
+                </p>
                 <div class="row">
                   <div class="col-md-4" ng-repeat="folder in folderList()">
                     <div class="checkbox">
@@ -84,7 +88,7 @@
             </div>
           </div>
         </div>
-        <div class="tab-pane" id="device-advanced">
+        <div id="device-advanced" class="tab-pane">
           <div class="row form-group">
             <div class="col-md-6">
               <div class="form-group">
@@ -108,25 +112,23 @@
             <div class="col-md-12">
               <label translate>Device rate limits</label>
               <div class="row">
-                <div class="col-md-6">
-                  <div ng-class="{'has-error': deviceEditor.maxSendKbps.$invalid && deviceEditor.maxSendKbps.$dirty}">
-                    <div class="row">
-                      <span class="col-md-8" translate>Outgoing Rate Limit (KiB/s)</span>
-                      <div class="col-md-4">
-                        <input name="maxSendKbps" id="maxSendKbps" class="form-control" type="number" pattern="\d+" ng-model="currentDevice.maxSendKbps" min="0"/>
-                      </div>
-                    </div>
-                    <p class="help-block" ng-if="!deviceEditor.maxSendKbps.$valid && deviceEditor.maxSendKbps.$dirty" translate>The rate limit must be a non-negative number (0: no limit)</p>
-                  </div>
-                </div>
                 <div class="col-md-6" ng-class="{'has-error': deviceEditor.maxRecvKbps.$invalid && deviceEditor.maxRecvKbps.$dirty}">
                   <div class="row">
-                    <span class="col-md-8" translate>Outgoing Rate Limit (KiB/s)</span>
+                    <span class="col-md-8" translate>Incoming Rate Limit (KiB/s)</span>
                     <div class="col-md-4">
                       <input name="maxRecvKbps" id="maxRecvKbps" class="form-control" type="number" pattern="\d+" ng-model="currentDevice.maxRecvKbps" min="0"/>
                     </div>
                   </div>
                   <p class="help-block" ng-if="!deviceEditor.maxRecvKbps.$valid && deviceEditor.maxRecvKbps.$dirty" translate>The rate limit must be a non-negative number (0: no limit)</p>
+                </div>
+                <div class="col-md-6" ng-class="{'has-error': deviceEditor.maxSendKbps.$invalid && deviceEditor.maxSendKbps.$dirty}">
+                  <div class="row">
+                    <span class="col-md-8" translate>Outgoing Rate Limit (KiB/s)</span>
+                    <div class="col-md-4">
+                      <input name="maxSendKbps" id="maxSendKbps" class="form-control" type="number" pattern="\d+" ng-model="currentDevice.maxSendKbps" min="0"/>
+                    </div>
+                  </div>
+                  <p class="help-block" ng-if="!deviceEditor.maxSendKbps.$valid && deviceEditor.maxSendKbps.$dirty" translate>The rate limit must be a non-negative number (0: no limit)</p>
                 </div>
               </div>
             </div>
