@@ -150,17 +150,6 @@ func (w *Wrapper) UpdateWithIntroducerOverride() *Wrapper {
 	return nil
 }
 
-// ReplaceBlocking swaps the current configuration object for the given one,
-// and waits for subscribers to be notified.
-func (w *Wrapper) ReplaceBlocking(cfg Configuration) error {
-	w.mut.Lock()
-	wg := sync.NewWaitGroup()
-	err := w.replaceLocked(cfg, wg)
-	w.mut.Unlock()
-	wg.Wait()
-	return err
-}
-
 // Replace swaps the current configuration object for the given one.
 func (w *Wrapper) Replace(cfg Configuration) (Waiter, error) {
 	w.mut.Lock()
